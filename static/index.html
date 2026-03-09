@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Local Qwen Chat</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: #0b1020;
+        color: #eaf0ff;
+      }
+      .container {
+        max-width: 900px;
+        margin: 24px auto;
+        padding: 16px;
+      }
+      .panel {
+        background: #151c34;
+        border-radius: 12px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      select,
+      input,
+      button,
+      textarea {
+        border: 1px solid #2f3d6d;
+        background: #0f1730;
+        color: #eaf0ff;
+        border-radius: 8px;
+        padding: 8px 10px;
+        font-size: 14px;
+      }
+      button {
+        cursor: pointer;
+      }
+      #chat {
+        height: 430px;
+        overflow-y: auto;
+        background: #0f1730;
+        border-radius: 10px;
+        padding: 10px;
+      }
+      .msg {
+        margin: 8px 0;
+        padding: 10px 12px;
+        border-radius: 10px;
+      }
+      .user {
+        background: #1f3b6b;
+      }
+      .assistant {
+        background: #253051;
+      }
+      .msg-role {
+        font-size: 12px;
+        opacity: 0.8;
+        margin-bottom: 6px;
+        font-weight: 600;
+      }
+      .msg-content p {
+        margin: 0 0 8px;
+        line-height: 1.45;
+      }
+      .msg-content p:last-child {
+        margin-bottom: 0;
+      }
+      .msg-content ul,
+      .msg-content ol {
+        margin: 0 0 8px 20px;
+        padding: 0;
+      }
+      .msg-content li {
+        margin: 4px 0;
+        line-height: 1.45;
+      }
+      .msg-content pre {
+        background: #0b1328;
+        border: 1px solid #2f3d6d;
+        border-radius: 8px;
+        padding: 10px;
+        overflow-x: auto;
+        margin: 0 0 8px;
+      }
+      .msg-content code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      .msg-content p code,
+      .msg-content li code {
+        background: #0b1328;
+        border: 1px solid #2f3d6d;
+        border-radius: 6px;
+        padding: 1px 5px;
+      }
+      .meta {
+        opacity: 0.8;
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      textarea {
+        width: 100%;
+        min-height: 80px;
+        resize: vertical;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Local Qwen Chat</h1>
+      <div class="panel">
+        <div class="row">
+          <label for="modelSelect">Model:</label>
+          <select id="modelSelect"></select>
+          <button id="loadModelBtn">Load Model</button>
+        </div>
+        <div class="row" style="margin-top: 10px">
+          <label for="temp">Temperature</label>
+          <input id="temp" type="number" min="0" max="2" step="0.1" value="0.7" />
+          <label for="maxTokens">Max New Tokens</label>
+          <input id="maxTokens" type="number" min="16" max="1024" step="1" value="256" />
+        </div>
+        <div id="status" class="meta">Loading models...</div>
+      </div>
+
+      <div class="panel">
+        <div id="chat"></div>
+      </div>
+
+      <div class="panel">
+        <textarea id="message" placeholder="Type your message..."></textarea>
+        <div class="row" style="margin-top: 10px">
+          <button id="sendBtn">Send</button>
+          <button id="clearBtn">Clear Chat</button>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const modelSelect = document.getElementById("modelSelect");
+      const loadModelBtn = document.getElementById("loadModelBtn");
+      const sendBtn = document.getElementById("sendBtn");
+      const clearBtn = document.getElementById("clearBtn");
+      const statusEl = document.getElementById("status");
+      const messageEl = document.getElementById("message");
+      const chatEl = document.getElementById("chat");
+      const tempEl = document.getElementById("temp");
+      const maxTokensEl = document.getElementById("maxTokens");
+
+      let history = [];
+      let activeModel = null;
+
+      function escapeHtml(text) {
+        return text
+          .replaceAll("&", "&amp;")
+          .replaceAll("<", "&lt;")
+          .replaceAll(">", "&gt;")
+          .replaceAll('"', "&quot;")
+          .replaceAll("'", "&#39;");
+      }
+
+      function normalizeAssistantText(text) {
+        return text
+          .replace(/\\\(([\s\S]*?)\\\)/g, "$1")
+          .replace(/\\\[([\s\S]*?)\\\]/g, "$1")
+          .replace(/\\([()\[\]])/g, "$1")
+          .replace(/\\([a-zA-Z]+)/g, "$1")
+          .replace(/\r\n/g, "\n")
+          .trim();
+      }
+
+      function formatInline(text) {
+        return text
+          .replace(/`([^`]+)`/g, "<code>$1</code>")
+          .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+          .replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      }
+
+      function renderMessageHtml(rawText, role) {
+        const text = role === "assistant" ? normalizeAssistantText(rawText) : rawText.trim();
+        const codeBlocks = [];
+        let blockIndex = 0;
+
+        const withPlaceholders = text.replace(/```([\s\S]*?)```/g, (_, code) => {
+          const token = `@@CODEBLOCK_${blockIndex}@@`;
+          codeBlocks.push(`<pre><code>${escapeHtml(code.trim())}</code></pre>`);
+          blockIndex += 1;
+          return token;
+        });
+
+        const lines = withPlaceholders.split("\n");
+        const htmlParts = [];
+        let paragraph = [];
+        let listType = null;
+
+        function flushParagraph() {
+          if (!paragraph.length) return;
+          const combined = paragraph.join(" ");
+          htmlParts.push(`<p>${formatInline(escapeHtml(combined))}</p>`);
+          paragraph = [];
+        }
+
+        function closeList() {
+          if (listType) {
+            htmlParts.push(`</${listType}>`);
+            listType = null;
+          }
+        }
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+
+          if (!trimmed) {
+            flushParagraph();
+            closeList();
+            continue;
+          }
+
+          const codeTokenMatch = trimmed.match(/^@@CODEBLOCK_(\d+)@@$/);
+          if (codeTokenMatch) {
+            flushParagraph();
+            closeList();
+            htmlParts.push(codeBlocks[Number(codeTokenMatch[1])]);
+            continue;
+          }
+
+          const ulMatch = trimmed.match(/^[-*]\s+(.*)$/);
+          if (ulMatch) {
+            flushParagraph();
+            if (listType !== "ul") {
+              closeList();
+              htmlParts.push("<ul>");
+              listType = "ul";
+            }
+            htmlParts.push(`<li>${formatInline(escapeHtml(ulMatch[1]))}</li>`);
+            continue;
+          }
+
+          const olMatch = trimmed.match(/^\d+\.\s+(.*)$/);
+          if (olMatch) {
+            flushParagraph();
+            if (listType !== "ol") {
+              closeList();
+              htmlParts.push("<ol>");
+              listType = "ol";
+            }
+            htmlParts.push(`<li>${formatInline(escapeHtml(olMatch[1]))}</li>`);
+            continue;
+          }
+
+          closeList();
+          paragraph.push(trimmed);
+        }
+
+        flushParagraph();
+        closeList();
+
+        return htmlParts.join("") || "<p></p>";
+      }
+
+      function addMessage(role, text) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `msg ${role}`;
+
+        const roleLabel = document.createElement("div");
+        roleLabel.className = "msg-role";
+        roleLabel.textContent = role === "user" ? "You" : "Assistant";
+
+        const content = document.createElement("div");
+        content.className = "msg-content";
+        content.innerHTML = renderMessageHtml(text, role);
+
+        wrapper.appendChild(roleLabel);
+        wrapper.appendChild(content);
+        chatEl.appendChild(wrapper);
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      function setStatus(text) {
+        statusEl.textContent = text;
+      }
+
+      async function loadModels() {
+        const res = await fetch("/api/models");
+        const data = await res.json();
+
+        modelSelect.innerHTML = "";
+        for (const model of data.models) {
+          const option = document.createElement("option");
+          option.value = model.id;
+          option.textContent = `${model.label} (${model.id})`;
+          modelSelect.appendChild(option);
+        }
+
+        if (data.current_model_id) {
+          modelSelect.value = data.current_model_id;
+          activeModel = data.current_model_id;
+        }
+
+        setStatus(`Device: ${data.device}. Selected model: ${activeModel || "none"}`);
+      }
+
+      async function selectModel() {
+        const model_id = modelSelect.value;
+        setStatus(`Loading ${model_id} (first load will download model weights)...`);
+
+        const res = await fetch("/api/select-model", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model_id }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          setStatus(`Model load failed: ${data.detail || "unknown error"}`);
+          return;
+        }
+
+        activeModel = data.model_id;
+        setStatus(`Loaded ${data.label} on ${data.device}.`);
+      }
+
+      async function sendMessage() {
+        const text = messageEl.value.trim();
+        if (!text) return;
+        if (!activeModel) {
+          setStatus("Please load a model first.");
+          return;
+        }
+
+        addMessage("user", text);
+        history.push({ role: "user", content: text });
+        messageEl.value = "";
+
+        setStatus("Generating...");
+
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: text,
+            history,
+            temperature: Number(tempEl.value),
+            max_new_tokens: Number(maxTokensEl.value),
+            top_p: 0.9,
+          }),
+        });
+
+        const data = await res.json();
+        if (!res.ok) {
+          addMessage("assistant", `[Error] ${data.detail || "unknown error"}`);
+          setStatus("Generation failed.");
+          return;
+        }
+
+        addMessage("assistant", data.reply);
+        history.push({ role: "assistant", content: data.reply });
+        setStatus(`Ready. Model: ${data.model_id} on ${data.device}.`);
+      }
+
+      function clearChat() {
+        history = [];
+        chatEl.innerHTML = "";
+        setStatus(`Cleared chat. Model: ${activeModel || "none"}.`);
+      }
+
+      loadModelBtn.addEventListener("click", selectModel);
+      sendBtn.addEventListener("click", sendMessage);
+      clearBtn.addEventListener("click", clearChat);
+
+      messageEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+          sendMessage();
+        }
+      });
+
+      loadModels().catch((err) => {
+        setStatus(`Failed to load model list: ${err}`);
+      });
+    </script>
+  </body>
+</html>
